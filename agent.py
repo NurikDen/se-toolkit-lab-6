@@ -26,42 +26,73 @@ PROJECT_ROOT = Path(__file__).parent.resolve()
 # Maximum tool calls per question
 MAX_TOOL_CALLS = 10
 
-# System prompt for the documentation agent
-SYSTEM_PROMPT = """You are a documentation assistant for a software engineering lab.
-You have access to two tools:
-- list_files: List files and directories in a given path. Use this to discover what files exist.
-- read_file: Read the contents of a file. Use this to examine file contents for answers.
+# System prompt for the system agent
+SYSTEM_PROMPT = """You are a documentation and system assistant for a software engineering lab.
+You have access to three tools:
 
-When asked a question about the project:
-1. Use list_files to discover relevant wiki files (start with "wiki" directory)
-2. Use read_file to examine specific files that might contain the answer
-3. Identify the specific section that answers the question
-4. Provide your final answer with a source reference in the format: wiki/filename.md#section-anchor
+1. list_files - List files and directories in a given path. Use this to discover what files exist.
+2. read_file - Read the contents of a file. Use this to examine file contents for answers.
+3. query_api - Call the live backend API. Use this to query live data or check system behavior.
 
-To create a section anchor:
-- Look for section headers in the file (lines starting with # or ##)
-- Convert the header text to lowercase, replace spaces with hyphens
-- Example: "## Resolving Merge Conflicts" becomes "#resolving-merge-conflicts"
+When to use each tool:
 
-Always be concise and accurate. If you cannot find the answer in the wiki, say so honestly.
+**Use list_files and read_file for:**
+- Documentation questions (files in wiki/ directory)
+- Source code questions (files in backend/, frontend/, etc.)
+- Configuration files (docker-compose.yml, Dockerfile, etc.)
+
+**Use query_api for:**
+- Live data queries (e.g., "how many items", "what is the completion rate")
+- HTTP status code questions (e.g., "what status code when unauthorized")
+- Testing API endpoints to see behavior
+- Analytics queries
+
+**For bug diagnosis:**
+1. First use query_api to reproduce the error and get the error message
+2. Note the error type and status code
+3. Use read_file to examine the source code at the error location
+4. Explain what went wrong based on the code
+
+When answering:
+- Be concise and accurate
+- Cite sources when reading from files (format: path/to/file.md#section-anchor)
+- For API queries, include the status code and relevant data in your answer
+- If you cannot find the answer, say so honestly
 """
 
 
 def load_config() -> dict[str, str]:
-    """Load configuration from environment variables or .env.agent.secret."""
-    env_path = Path(__file__).parent / ".env.agent.secret"
-    load_dotenv(env_path)
+    """Load configuration from environment variables or .env files."""
+    # Load LLM config from .env.agent.secret
+    llm_env_path = Path(__file__).parent / ".env.agent.secret"
+    load_dotenv(llm_env_path)
+    
+    # Load LMS config from .env.docker.secret
+    lms_env_path = Path(__file__).parent / ".env.docker.secret"
+    load_dotenv(lms_env_path, override=False)
 
-    required_vars = ["LLM_API_KEY", "LLM_API_BASE", "LLM_MODEL"]
+    # LLM configuration (required)
+    required_llm_vars = ["LLM_API_KEY", "LLM_API_BASE", "LLM_MODEL"]
     config = {}
 
-    for var in required_vars:
+    for var in required_llm_vars:
         value = os.getenv(var)
         if not value:
             print(f"Error: Missing required environment variable: {var}", file=sys.stderr)
-            print(f"Please ensure {env_path} is properly configured.", file=sys.stderr)
+            print(f"Please ensure {llm_env_path} is properly configured.", file=sys.stderr)
             sys.exit(1)
         config[var] = value
+
+    # LMS API configuration (required for query_api)
+    lms_api_key = os.getenv("LMS_API_KEY")
+    if not lms_api_key:
+        print(f"Error: Missing required environment variable: LMS_API_KEY", file=sys.stderr)
+        print(f"Please ensure {lms_env_path} is properly configured.", file=sys.stderr)
+        sys.exit(1)
+    config["LMS_API_KEY"] = lms_api_key
+
+    # Agent API base URL (optional, defaults to localhost)
+    config["AGENT_API_BASE_URL"] = os.getenv("AGENT_API_BASE_URL", "http://localhost:42002")
 
     return config
 
@@ -140,7 +171,72 @@ def list_files(path: str) -> str:
         return f"Error listing directory: {e}"
 
 
-# Tool definitions for LLM function calling
+def query_api(method: str, path: str, body: str | None = None, config: dict | None = None) -> str:
+    """
+    Call the deployed backend API.
+    
+    Args:
+        method: HTTP method (GET, POST, etc.)
+        path: API endpoint path (e.g., '/items/', '/analytics/completion-rate')
+        body: Optional JSON request body for POST/PUT requests
+        config: Configuration dict with LMS_API_KEY and AGENT_API_BASE_URL
+    
+    Returns:
+        JSON string with status_code and body, or error message
+    """
+    if config is None:
+        config = {}
+    
+    api_key = config.get("LMS_API_KEY", "")
+    base_url = config.get("AGENT_API_BASE_URL", "http://localhost:42002")
+    
+    # Validate method
+    valid_methods = ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"]
+    if method.upper() not in valid_methods:
+        return f"Error: Invalid HTTP method '{method}'. Valid methods: {', '.join(valid_methods)}"
+    
+    # Build URL
+    endpoint = f"{base_url.rstrip('/')}{path}"
+    
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    
+    print(f"  [query_api] {method} {endpoint}", file=sys.stderr)
+    
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            # Prepare request body if provided
+            kwargs: dict[str, Any] = {"headers": headers}
+            if body and method.upper() in ["POST", "PUT", "PATCH"]:
+                kwargs["content"] = body
+            
+            response = client.request(method.upper(), endpoint, **kwargs)
+            
+            result = {
+                "status_code": response.status_code,
+                "body": response.text,
+            }
+            
+            result_str = json.dumps(result)
+            print(f"  [query_api] Status: {response.status_code}", file=sys.stderr)
+            return result_str
+            
+    except httpx.HTTPStatusError as e:
+        result = {
+            "status_code": e.response.status_code,
+            "body": e.response.text,
+        }
+        return json.dumps(result)
+    except httpx.RequestError as e:
+        return f"Error: Request failed - {e}"
+    except Exception as e:
+        return f"Error: API call failed - {e}"
+
+
+# Global config reference for tools (set in run_agentic_loop)
+_tool_config: dict[str, str] = {}
 TOOLS = [
     {
         "type": "function",
@@ -175,6 +271,31 @@ TOOLS = [
                 "required": ["path"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_api",
+            "description": "Call the live backend API. Use this to query live data, check HTTP status codes, or test API endpoints. Do NOT use for documentation questions.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "method": {
+                        "type": "string",
+                        "description": "HTTP method (GET, POST, PUT, DELETE, PATCH)"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "API endpoint path (e.g., '/items/', '/analytics/completion-rate')"
+                    },
+                    "body": {
+                        "type": "string",
+                        "description": "Optional JSON request body for POST/PUT/PATCH requests"
+                    }
+                },
+                "required": ["method", "path"]
+            }
+        }
     }
 ]
 
@@ -182,30 +303,41 @@ TOOLS = [
 TOOL_FUNCTIONS = {
     "read_file": read_file,
     "list_files": list_files,
+    "query_api": query_api,
 }
 
 
-def execute_tool(tool_name: str, args: dict[str, Any]) -> str:
+def execute_tool(tool_name: str, args: dict[str, Any], config: dict | None = None) -> str:
     """
     Execute a tool and return the result.
-    
+
     Args:
         tool_name: Name of the tool to execute
         args: Arguments to pass to the tool
-    
+        config: Configuration dict (passed to query_api for auth)
+
     Returns:
         Tool result as string
     """
     if tool_name not in TOOL_FUNCTIONS:
         return f"Error: Unknown tool: {tool_name}"
-    
+
     func = TOOL_FUNCTIONS[tool_name]
+
+    # query_api needs config for authentication
+    if tool_name == "query_api":
+        method = args.get("method", "")
+        path = args.get("path", "")
+        body = args.get("body")
+        if not method or not path:
+            return "Error: Missing required arguments 'method' and/or 'path'"
+        return func(method, path, body, config)
     
-    # Extract the 'path' argument
+    # read_file and list_files need path argument
     path = args.get("path", "")
     if not path:
         return "Error: Missing required argument 'path'"
-    
+
     return func(path)
 
 
@@ -360,9 +492,9 @@ def run_agentic_loop(question: str, config: dict[str, str]) -> dict[str, Any]:
                     args = {}
                 
                 print(f"Executing tool: {tool_name}({args})", file=sys.stderr)
-                
-                # Execute tool
-                result = execute_tool(tool_name, args)
+
+                # Execute tool (pass config for query_api authentication)
+                result = execute_tool(tool_name, args, config)
                 
                 # Record tool call for output
                 all_tool_calls.append({
