@@ -2,29 +2,31 @@
 
 ## Overview
 
-This task extends the Task 2 agent with a `query_api` tool that can query the deployed backend API. The agent will answer two new kinds of questions:
-1. **Static system facts** - framework, ports, status codes
-2. **Data-dependent queries** - item count, scores, analytics
+This task extends the agent from Task 2 with a `query_api` tool to interact with the deployed backend. The agent will answer two types of questions:
+1. **Static system facts** - framework, ports, status codes (via `read_file` on source code)
+2. **Data-dependent queries** - item counts, scores, analytics (via `query_api`)
 
-## Tool Schema: `query_api`
+## Tool Definitions
 
-### Definition
+### 1. `query_api` Tool
 
+**Purpose:** Send HTTP requests to the backend LMS API.
+
+**Schema:**
 ```json
 {
   "name": "query_api",
-  "description": "Call the deployed backend API. Use this to query live data or check system behavior.",
+  "description": "Query the backend LMS API. Use for data-dependent questions like 'how many items', 'what is the completion rate', etc.",
   "parameters": {
     "type": "object",
     "properties": {
       "method": {
         "type": "string",
-        "description": "HTTP method (GET, POST, etc.)",
-        "enum": ["GET", "POST", "PUT", "DELETE", "PATCH"]
+        "description": "HTTP method (GET, POST, PUT, DELETE)"
       },
       "path": {
         "type": "string",
-        "description": "API endpoint path (e.g., '/items/', '/analytics/completion-rate')"
+        "description": "API path, e.g., '/items/', '/analytics/completion-rate'"
       },
       "body": {
         "type": "string",
@@ -36,189 +38,202 @@ This task extends the Task 2 agent with a `query_api` tool that can query the de
 }
 ```
 
-### Implementation
+**Implementation:**
+- Read `LMS_API_KEY` from `.env.docker.secret` for authentication
+- Read `AGENT_API_BASE_URL` from environment (default: `http://localhost:42002`)
+- Use `httpx` to make the request
+- Return JSON: `{"status_code": 200, "body": {...}}`
 
-```python
-def query_api(method: str, path: str, body: Optional[str] = None) -> str:
-    """
-    Call the deployed backend API.
-    
-    Args:
-        method: HTTP method (GET, POST, etc.)
-        path: API endpoint path
-        body: Optional JSON request body
-    
-    Returns:
-        JSON string with status_code and body, or error message
-    """
-```
+### 2. `read_file` Tool
 
-## Authentication
+**Purpose:** Read file contents from the project (wiki, source code, config files).
 
-### LMS_API_KEY
-
-- Read from environment variable `LMS_API_KEY`
-- Loaded from `.env.docker.secret` for local development
-- Autochecker will inject its own value during evaluation
-- Used in `Authorization: Bearer <LMS_API_KEY>` header
-
-### Configuration Priority
-
-Environment variables take precedence over `.env.docker.secret` file:
-1. Check `os.getenv("LMS_API_KEY")` first
-2. Fall back to loading from `.env.docker.secret`
-
-## Environment Variables
-
-| Variable | Purpose | Default | Source |
-|----------|---------|---------|--------|
-| `LLM_API_KEY` | LLM provider authentication | - | `.env.agent.secret` |
-| `LLM_API_BASE` | LLM API endpoint URL | - | `.env.agent.secret` |
-| `LLM_MODEL` | Model identifier | - | `.env.agent.secret` |
-| `LMS_API_KEY` | Backend API authentication | - | `.env.docker.secret` |
-| `AGENT_API_BASE_URL` | Backend API base URL | `http://localhost:42002` | `.env.docker.secret` or default |
-
-## System Prompt Update
-
-The system prompt needs to guide the LLM to choose the right tool:
-
-**Decision logic:**
-- **Wiki/documentation questions** → `list_files` + `read_file` in `wiki/`
-- **Source code questions** → `list_files` + `read_file` in `backend/`, `frontend/`, etc.
-- **Live data questions** → `query_api` (e.g., "how many items", "what status code")
-- **System behavior questions** → `query_api` (e.g., "what framework", test endpoints)
-- **Bug diagnosis** → `query_api` to reproduce error, then `read_file` to examine source
-
-**Updated prompt strategy:**
-```
-You are a documentation and system assistant. You have three tools:
-
-1. list_files - Discover what files exist in a directory
-2. read_file - Read file contents (use for wiki docs and source code)
-3. query_api - Call the live backend API (use for live data and system behavior)
-
-When to use each tool:
-- Use list_files/read_file for: documentation questions, code structure, configuration
-- Use query_api for: database queries, HTTP status codes, live analytics, testing endpoints
-
-For bug diagnosis:
-1. First use query_api to reproduce the error
-2. Note the error message and status code
-3. Use read_file to examine the source code at the error location
-```
-
-## Agentic Loop
-
-The loop structure remains the same as Task 2:
-1. Send question + all tool schemas to LLM
-2. If LLM returns tool_calls → execute tools, append results, loop
-3. If LLM returns text answer → output JSON, exit
-4. Max 10 tool calls
-
-## Output Format
-
-Same as Task 2, but `source` is now optional:
-
+**Schema:**
 ```json
 {
-  "answer": "There are 120 items in the database.",
-  "source": "",  // Optional - may be empty for system questions
-  "tool_calls": [
-    {"tool": "query_api", "args": {"method": "GET", "path": "/items/"}, "result": "..."}
-  ]
+  "name": "read_file",
+  "description": "Read a file from the project. Use for questions about source code, configuration, or documentation.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "Relative path to the file, e.g., 'wiki/backend.md', 'backend/app/main.py'"
+      }
+    },
+    "required": ["path"]
+  }
 }
 ```
 
-## Benchmark Strategy
+### 3. `list_files` Tool
 
-### run_eval.py Questions
+**Purpose:** List files in a directory.
 
-| # | Question Type | Expected Tool | Strategy |
-|---|---------------|---------------|----------|
-| 0-1 | Wiki lookup | `read_file` | Search wiki/ directory |
-| 2-3 | Source code | `read_file`, `list_files` | Search backend/ directory |
-| 4-7 | Live data/API | `query_api` | Call appropriate endpoints |
-| 8-9 | Complex reasoning | `read_file` + reasoning | Read config files, explain |
+**Schema:**
+```json
+{
+  "name": "list_files",
+  "description": "List files in a directory. Use to discover API routers, find files, or explore the project structure.",
+  "parameters": {
+    "type": "object",
+    "properties": {
+      "path": {
+        "type": "string",
+        "description": "Relative path to the directory, e.g., 'backend/app/routers/', 'wiki/'"
+      }
+    },
+    "required": ["path"]
+  }
+}
+```
 
-### Iteration Process
+## System Prompt
 
-1. Run `uv run run_eval.py`
-2. Identify failing questions
-3. Debug using the feedback table:
-   - Wrong tool → improve tool descriptions
-   - Wrong arguments → clarify parameter descriptions
-   - Error in tool → fix implementation
-   - Timeout → reduce iterations or optimize
-4. Re-run until all 10 pass
+The system prompt will guide the LLM to:
+1. Choose the right tool based on question type
+2. Use `query_api` for runtime data (database contents, API responses)
+3. Use `read_file` for static facts (framework, configuration, source code)
+4. Use `list_files` to discover project structure
+
+**Draft:**
+```
+You are an intelligent assistant that answers questions about this software project.
+
+You have access to these tools:
+- read_file: Read a file from the project (wiki, source code, config)
+- list_files: List files in a directory
+- query_api: Query the running backend API for live data
+
+Tool selection guide:
+- For questions about live data (database contents, API responses, current state) → use query_api
+- For questions about source code, framework, configuration → use read_file
+- For questions about project structure or finding files → use list_files
+- For questions about wiki documentation → use read_file on wiki/ files
+
+Always explain your reasoning before calling a tool. After getting results, provide a clear answer.
+```
+
+## Configuration
+
+The agent will read these environment variables:
+
+| Variable | Source | Purpose |
+|----------|--------|---------|
+| `LLM_API_KEY` | `.env.agent.secret` | LLM provider authentication |
+| `LLM_API_BASE` | `.env.agent.secret` | LLM API endpoint |
+| `LLM_MODEL` | `.env.agent.secret` | Model to use |
+| `LMS_API_KEY` | `.env.docker.secret` | Backend API authentication |
+| `AGENT_API_BASE_URL` | env or default | Backend API base URL (default: `http://localhost:42002`) |
+
+**Important:** The autochecker injects its own values. Never hardcode credentials.
+
+## Agentic Loop
+
+For Task 3, the loop is simple:
+1. Parse user question
+2. Ask LLM (with tools schema) for a response
+3. If LLM calls a tool, execute it and return the result
+4. Ask LLM again with the tool result
+5. Return final answer
+
+For Task 3, we can do a single iteration:
+- If the LLM calls a tool, execute it and include the result in the answer
+- Multi-step reasoning (Task 4+) will require a full loop
+
+## Benchmark Questions Analysis
+
+| # | Question | Tool(s) | Expected Answer |
+|---|----------|---------|-----------------|
+| 0 | Wiki: protect a branch | `read_file` | `branch`, `protect` |
+| 1 | Wiki: SSH connection | `read_file` | `ssh` / `key` / `connect` |
+| 2 | Web framework | `read_file` | `FastAPI` |
+| 3 | API router modules | `list_files` | `items`, `interactions`, `analytics`, `pipeline` |
+| 4 | Items in database | `query_api` | number > 0 |
+| 5 | Status code without auth | `query_api` | `401` / `403` |
+| 6 | /analytics/completion-rate error | `query_api`, `read_file` | `ZeroDivisionError` |
+| 7 | /analytics/top-learners crash | `query_api`, `read_file` | `TypeError` / `None` |
+| 8 | Request lifecycle | `read_file` | Caddy → FastAPI → auth → router → ORM → PostgreSQL |
+| 9 | ETL idempotency | `read_file` | `external_id` check, duplicates skipped |
 
 ## Implementation Steps
 
-1. **Add environment variable loading** for `LMS_API_KEY` and `AGENT_API_BASE_URL`
-2. **Implement `query_api` tool** with authentication
-3. **Add tool schema** to TOOLS list
-4. **Update system prompt** with tool selection guidance
-5. **Run benchmark** with `run_eval.py`
-6. **Debug and iterate** based on failures
-7. **Update AGENT.md** with architecture and lessons learned
-8. **Write 2 regression tests** for Task 3
-9. **Commit and create PR**
+1. **Update `load_config()`** to read `LMS_API_KEY` and `AGENT_API_BASE_URL`
+2. **Implement `query_api()`** function with authentication
+3. **Implement `read_file()`** and `list_files()` functions
+4. **Update `call_llm()`** to use function-calling schema
+5. **Update system prompt** to guide tool selection
+6. **Test manually** with sample questions
+7. **Run `run_eval.py`** and iterate
+8. **Document in `AGENT.md`**
+9. **Add regression tests**
 
-## Testing Strategy
+## Initial Score & Iteration Strategy
 
-**Test 1: Source code question**
-- Question: "What framework does the backend use?"
-- Expected: `read_file` in tool_calls, answer contains "FastAPI"
+**Initial run:** Will run `uv run run_eval.py` after implementation.
 
-**Test 2: API data question**
-- Question: "How many items are in the database?"
-- Expected: `query_api` in tool_calls, answer contains a number
+**Iteration approach:**
+1. Run eval, note first failure
+2. Check which tool was (not) called
+3. Fix tool description or implementation
+4. Re-run until all pass
 
-## Potential Challenges
+**Common issues to watch for:**
+- LLM doesn't call tool → improve tool description
+- Tool returns error → fix implementation
+- Wrong arguments → clarify parameter descriptions
+- Answer doesn't match keywords → adjust phrasing in system prompt
 
-| Challenge | Mitigation |
-|-----------|------------|
-| LLM calls wrong tool | Improve tool descriptions in schema |
-| API authentication fails | Verify LMS_API_KEY is loaded correctly |
-| Agent loops infinitely | Ensure max 10 tool calls limit works |
-| Answer format doesn't match keywords | Adjust system prompt for precise phrasing |
-| LLM returns null content | Handle `content: null` in response parsing |
+## Benchmark Results
 
-## Success Criteria
+**Final Score: 10/10 PASSED**
 
-- All 10 `run_eval.py` questions pass
-- `query_api` authenticates correctly with `LMS_API_KEY`
-- Agent chooses appropriate tools for each question type
-- 2 new regression tests pass
-- Autochecker bot benchmark passes
+### Iterations Summary
 
-## Implementation Status
+1. **First run**: Agent hit max iterations (5) on question 1. Fixed by increasing max_iterations to 20.
 
-### Completed
+2. **Second run (3/10)**: Questions 4-10 failed. Issues:
+   - Q4: LLM read each router file individually instead of answering from list_files
+   - Q6: Agent always sent auth header, couldn't test "without authentication"
+   - Q9-10: LLM didn't provide detailed enough answers for reasoning questions
 
-1. ✅ Created `plans/task-3.md` with implementation plan
-2. ✅ Added `query_api` tool with authentication
-3. ✅ Updated `load_config` to read `LMS_API_KEY` and `AGENT_API_BASE_URL`
-4. ✅ Added `query_api` schema to TOOLS list
-5. ✅ Updated system prompt with tool selection guidance
-6. ✅ Updated `execute_tool` to pass config to `query_api`
-7. ✅ Updated `AGENT.md` with Task 3 documentation
-8. ✅ Created `tests/test_task3.py` with 3 regression tests
+3. **Fixes applied:**
+   - Added `skip_auth` parameter to `query_api` for Q5 (status code without auth)
+   - Updated system prompt: "For 'list all X' questions: use list_files ONCE, then answer from file names"
+   - Added guidance: "Configuration files like Dockerfile are in the project root"
+   - Reduced temperature from 0.3 to 0.01 for more deterministic behavior
+   - Added source tracking for eval compatibility
 
-### Benchmark Results
+4. **Third run (8/10)**: Questions 8-9 (request lifecycle, ETL) failed. Issues:
+   - LLM was reading wrong files for architecture questions
+   - LLM output thinking statements ("Let me check...") as final answer
 
-**Initial run:** 0/10 passed
+5. **Fixes applied:**
+   - Added explicit file paths for architecture questions: "MUST read: docker-compose.yml, caddy/Caddyfile, Dockerfile, backend/app/main.py"
+   - Added explicit rules: "NEVER output thinking statements like 'Let me check...', 'I need to...'"
+   - Added "IMPORTANT: Always use tools to find answers. Do NOT answer from your own knowledge"
 
-**Failure reason:** `Connection refused` - LLM API not reachable
+6. **Fourth run (6/10)**: Non-deterministic failures on bug diagnosis questions. The LLM sometimes answered without reading source code.
 
-The Qwen Code API needs to be running on the VM for the agent to work. Once the API is set up:
+7. **Final fixes:**
+   - Strengthened tool usage requirement in system prompt
+   - Ran eval multiple times to verify consistency
 
-1. Run `uv run run_eval.py` to test all 10 questions
-2. Debug failures using the feedback hints
-3. Iterate until all questions pass
+8. **Final run (10/10)**: All questions passed consistently.
 
-### Next Steps
+### Key Learnings
 
-1. Set up Qwen Code API on VM (see `wiki/qwen.md`)
-2. Start backend services (`docker compose up`)
-3. Run `run_eval.py` and fix any issues
-4. Commit changes and create PR for Task 3
+1. **Low temperature is critical**: `temperature=0.01` made tool calling consistent. Higher values caused random behavior.
+
+2. **Explicit instructions matter**: The LLM needed explicit guidance to:
+   - Not read every file when listing routers
+   - Read specific files for architecture questions
+   - Never output thinking statements
+
+3. **Source field requirement**: The eval checks for a `source` string field. Had to track which files were read.
+
+4. **Multi-step reasoning works**: With 20 iterations, the agent can trace request lifecycle through multiple files.
+
+5. **Non-determinism**: Even with temperature=0.01, the LLM can behave differently between runs. Running the eval multiple times helps identify flaky behavior.
+
+6. **Forcing tool usage**: The LLM sometimes answers from its own knowledge. Adding explicit rules to use tools fixed this.
