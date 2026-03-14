@@ -12,12 +12,53 @@ Output:
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
 
 import httpx
 from dotenv import load_dotenv
+
+# Project root for path security validation
+PROJECT_ROOT = Path(__file__).parent.resolve()
+
+# Maximum tool calls per question
+MAX_TOOL_CALLS = 10
+
+# System prompt for the system agent
+SYSTEM_PROMPT = """You are a documentation and system assistant for a software engineering lab.
+You have access to three tools:
+
+1. list_files - List files and directories in a given path. Use this to discover what files exist.
+2. read_file - Read the contents of a file. Use this to examine file contents for answers.
+3. query_api - Call the live backend API. Use this to query live data or check system behavior.
+
+When to use each tool:
+
+**Use list_files and read_file for:**
+- Documentation questions (files in wiki/ directory)
+- Source code questions (files in backend/, frontend/, etc.)
+- Configuration files (docker-compose.yml, Dockerfile, etc.)
+
+**Use query_api for:**
+- Live data queries (e.g., "how many items", "what is the completion rate")
+- HTTP status code questions (e.g., "what status code when unauthorized")
+- Testing API endpoints to see behavior
+- Analytics queries
+
+**For bug diagnosis:**
+1. First use query_api to reproduce the error and get the error message
+2. Note the error type and status code
+3. Use read_file to examine the source code at the error location
+4. Explain what went wrong based on the code
+
+When answering:
+- Be concise and accurate
+- Cite sources when reading from files (format: path/to/file.md#section-anchor)
+- For API queries, include the status code and relevant data in your answer
+- If you cannot find the answer, say so honestly
+"""
 
 
 # -----------------------------------------------------------------------------
@@ -506,6 +547,148 @@ def run_agent(question: str, config: dict, max_iterations: int = 20) -> dict:
         "answer": "I was unable to complete the analysis within the maximum iterations.",
         "tool_calls": all_tool_calls,
         "source": source_str,
+    }
+
+
+def extract_source_from_answer(answer: str, file_contents: dict[str, str]) -> str:
+    """
+    Extract a source reference from the answer based on files that were read.
+    
+    Args:
+        answer: The LLM's answer text
+        file_contents: Dict mapping file paths to their contents
+    
+    Returns:
+        Source reference in format wiki/filename.md#section-anchor
+    """
+    # Try to find the most relevant file and section
+    for file_path, content in file_contents.items():
+        if not file_path.startswith("wiki/"):
+            continue
+            
+        # Look for section headers in the content
+        lines = content.split("\n")
+        for i, line in enumerate(lines):
+            if line.startswith("#"):
+                # Extract header text
+                header_text = line.lstrip("#").strip()
+                # Create anchor
+                anchor = header_text.lower().replace(" ", "-").replace(".", "")
+                anchor = re.sub(r"[^a-z0-9-]", "", anchor)
+                
+                # Check if this section seems relevant (simple heuristic)
+                if len(file_contents) == 1:  # If only one file was read, use it
+                    return f"{file_path}#{anchor}"
+    
+    # Default: return first wiki file
+    for file_path in file_contents.keys():
+        if file_path.startswith("wiki/"):
+            return file_path
+    
+    return "wiki/unknown.md"
+
+
+def run_agentic_loop(question: str, config: dict[str, str]) -> dict[str, Any]:
+    """
+    Run the agentic loop: call LLM, execute tools, repeat until answer.
+    
+    Args:
+        question: User's question
+        config: LLM configuration
+    
+    Returns:
+        Result dict with answer, source, and tool_calls
+    """
+    # Initialize conversation
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": question},
+    ]
+    
+    # Track all tool calls for output
+    all_tool_calls = []
+    # Track files that were read (for source extraction)
+    files_read: dict[str, str] = {}
+    
+    tool_call_count = 0
+    
+    while tool_call_count < MAX_TOOL_CALLS:
+        print(f"\n[Loop iteration {tool_call_count + 1}]", file=sys.stderr)
+        
+        # Call LLM
+        print("Calling LLM...", file=sys.stderr)
+        response = call_llm_with_tools(messages, config)
+        
+        # Check if LLM returned tool calls
+        if "tool_calls" in response:
+            tool_calls = response["tool_calls"]
+            
+            # Add assistant message with tool calls to conversation
+            messages.append({
+                "role": "assistant",
+                "content": response.get("content", ""),
+                "tool_calls": tool_calls,
+            })
+            
+            # Execute each tool call
+            for tool_call in tool_calls:
+                tool_name = tool_call["function"]["name"]
+                try:
+                    args = json.loads(tool_call["function"]["arguments"])
+                except json.JSONDecodeError:
+                    args = {}
+                
+                print(f"Executing tool: {tool_name}({args})", file=sys.stderr)
+
+                # Execute tool (pass config for query_api authentication)
+                result = execute_tool(tool_name, args, config)
+                
+                # Record tool call for output
+                all_tool_calls.append({
+                    "tool": tool_name,
+                    "args": args,
+                    "result": result,
+                })
+                
+                # Track files read
+                if tool_name == "read_file" and not result.startswith("Error"):
+                    files_read[args.get("path", "")] = result
+                
+                # Append tool result to conversation
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.get("id", "unknown"),
+                    "content": result,
+                })
+            
+            tool_call_count += len(tool_calls)
+            
+        else:
+            # LLM returned final answer (no tool calls)
+            print("LLM returned final answer", file=sys.stderr)
+            final_answer = response.get("content", "No answer provided.")
+            
+            # Extract source
+            source = extract_source_from_answer(final_answer, files_read)
+            
+            # If no files were read, source might be generic
+            if not files_read:
+                source = "wiki/unknown.md"
+            
+            return {
+                "answer": final_answer,
+                "source": source,
+                "tool_calls": all_tool_calls,
+            }
+    
+    # Max iterations reached
+    print(f"Max tool calls ({MAX_TOOL_CALLS}) reached", file=sys.stderr)
+    
+    # Return whatever we have
+    return {
+        "answer": "Reached maximum tool call limit. Partial results may be available.",
+        "source": list(files_read.keys())[0] + "#unknown" if files_read else "wiki/unknown.md",
+        "tool_calls": all_tool_calls,
     }
 
 

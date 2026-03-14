@@ -6,6 +6,8 @@ This agent is a CLI tool that answers questions about the software project by ca
 
 ## Architecture
 
+### Task 1 Architecture (Basic LLM Call)
+
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
 │   CLI Arg   │ ──► │  agent.py   │ ──► │  LLM API    │ ──► │ Tool Calls  │
@@ -26,8 +28,9 @@ This agent is a CLI tool that answers questions about the software project by ca
                            │
                            ▼
                     ┌─────────────┐
-                    │  Logs       │
-                    │  (stderr)   │
+                    │  JSON Out   │
+                    │  + tool_    │
+                    │  calls log  │
                     └─────────────┘
 ```
 
