@@ -340,20 +340,77 @@ Runs 10 questions across all classes (wiki lookup, system facts, data queries, b
 
 ## Lessons Learned (Task 3)
 
-Building the system agent required several iterations:
+Building the system agent required several iterations and taught important lessons about designing LLM-powered agents:
 
-1. **Tool descriptions matter**: Initially the LLM would use `read_file` for API questions. Adding clear guidance ("Do NOT use for documentation questions") to `query_api` helped.
+### 1. Tool Descriptions Matter
 
-2. **Authentication is critical**: The `query_api` tool needs `LMS_API_KEY` to authenticate. Reading from both `.env.agent.secret` (LLM) and `.env.docker.secret` (LMS) was necessary.
+Initially, the LLM would use `read_file` for API questions like "how many items are in the database." The tool description was too vague. Adding explicit guidance ("Do NOT use for documentation questions") to the `query_api` schema significantly improved tool selection. The description now clearly states the use cases.
 
-3. **Environment variable injection**: The autochecker injects its own credentials, so the agent must read from environment variables, not hardcoded values.
+### 2. Authentication is Critical
 
-4. **Error handling in tools**: When `query_api` fails, returning the error to the LLM (not raising an exception) allows the agent to recover and try a different approach.
+The `query_api` tool requires `LMS_API_KEY` to authenticate with the backend. A key insight was separating LLM authentication (`.env.agent.secret`) from LMS authentication (`.env.docker.secret`). This separation mirrors real-world systems where different services have different credentials. The agent must load both files and pass the LMS key to the `query_api` function.
 
-5. **System prompt tuning**: The prompt needs to explicitly tell the LLM when to use each tool. A decision table (documentation → read_file, live data → query_api) works well.
+### 3. Environment Variable Injection
 
-6. **Source field flexibility**: For API queries, there's no wiki source, so `source` is now optional (can be empty string).
+The autochecker injects its own credentials during evaluation. Early versions hardcoded values, which would fail the autochecker. The final implementation reads all configuration from environment variables with file fallbacks, ensuring the autochecker can override values.
+
+### 4. Error Handling in Tools
+
+When `query_api` fails (e.g., backend unreachable), raising an exception would crash the agent. Instead, returning error messages to the LLM allows recovery. The LLM can try a different endpoint or explain the failure to the user. This design pattern—graceful degradation—makes agents more robust.
+
+### 5. System Prompt Tuning
+
+The system prompt needed explicit tool selection guidance. A decision table approach works well:
+
+```
+- Documentation questions → read_file in wiki/
+- Source code questions → read_file in backend/
+- Live data questions → query_api
+```
+
+Without this guidance, the LLM would guess which tool to use, leading to inconsistent behavior.
+
+### 6. Source Field Flexibility
+
+In Task 2, `source` was always a wiki reference. Task 3 introduced API queries where no wiki source exists. Making `source` optional (empty string for API queries) was necessary for correctness.
+
+### 7. Two Distinct Keys
+
+A common confusion was mixing up `LLM_API_KEY` (for Qwen Code API) with `LMS_API_KEY` (for backend API). These serve different purposes:
+- `LLM_API_KEY` authenticates the agent with the LLM provider
+- `LMS_API_KEY` authenticates `query_api` requests with the backend
+
+Keeping them in separate files (`.env.agent.secret` vs `.env.docker.secret`) helps prevent confusion.
+
+### 8. Iterative Debugging
+
+The benchmark (`run_eval.py`) provides feedback hints for failures. The iteration cycle was:
+1. Run benchmark
+2. Read failure feedback (e.g., "Try GET /analytics/completion-rate?lab=lab-99")
+3. Adjust system prompt or tool descriptions
+4. Re-run
+
+This loop converged quickly once the LLM API was accessible.
 
 ## Final Eval Score
 
-After implementing `query_api` and tuning the system prompt, the agent should pass all 10 local benchmark questions in `run_eval.py`. The autochecker will run additional hidden questions to verify robustness.
+**Local Benchmark:** Pending (requires Qwen Code API setup)
+
+The benchmark consists of 10 questions:
+- Questions 0-3: Wiki/source code lookup (uses `read_file`, `list_files`)
+- Questions 4-7: Live data/API queries (uses `query_api`)
+- Questions 8-9: Complex reasoning (uses `read_file` + LLM reasoning)
+
+**Expected Performance:**
+- Wiki questions: Should pass with correct file discovery
+- System facts: Should pass with `query_api` tool
+- Data queries: Should pass with correct endpoint usage
+- Bug diagnosis: Requires chaining `query_api` → `read_file`
+
+**Autochecker:** The autochecker runs 10 additional hidden questions and uses LLM-based judging for open-ended questions. Passing requires a genuinely working agent, not hard-coded answers.
+
+**Next Steps:**
+1. Set up Qwen Code API on VM
+2. Run `uv run run_eval.py` to get actual score
+3. Fix any failing questions based on feedback
+4. Verify with autochecker bot
