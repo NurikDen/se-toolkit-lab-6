@@ -19,12 +19,12 @@ This agent is a CLI tool that answers questions by calling a Large Language Mode
                     └─────────────┘
 ```
 
-## Components
-
 ### 1. Configuration Loader (`load_config`)
 
-- Reads environment variables from `.env.agent.secret`
-- Validates that `LLM_API_KEY`, `LLM_API_BASE`, and `LLM_MODEL` are present
+- Reads environment variables: `LLM_API_KEY`, `LLM_API_BASE`, `LLM_MODEL`
+- First checks system environment variables (for injection by autochecker/tests)
+- Falls back to `.env.agent.secret` file if env vars not set
+- Validates that all three required variables are present
 - Exits with error code 1 if any required variable is missing
 
 ### 2. LLM Client (`call_llm`)
@@ -57,19 +57,21 @@ This agent is a CLI tool that answers questions by calling a Large Language Mode
 
 ## Configuration
 
-Create `.env.agent.secret` in the project root:
+The agent reads LLM configuration from **environment variables**:
+
+- `LLM_API_KEY` - API key for authentication
+- `LLM_API_BASE` - Base URL of the LLM API endpoint
+- `LLM_MODEL` - Model identifier to use
+
+**Priority:** System environment variables take precedence over `.env.agent.secret`.
+
+This allows the autochecker to inject its own credentials when testing.
+
+For local development, create `.env.agent.secret`:
 
 ```bash
 cp .env.agent.example .env.agent.secret
 ```
-
-Fill in the variables:
-
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `LLM_API_KEY` | Your Qwen Code API key | `your-api-key-here` |
-| `LLM_API_BASE` | Base URL of the API endpoint | `http://10.93.24.193:42005/v1` |
-| `LLM_MODEL` | Model identifier | `qwen3-coder-plus` |
 
 ## Usage
 
