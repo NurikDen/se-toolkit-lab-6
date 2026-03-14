@@ -2,15 +2,27 @@
 
 ## Overview
 
-This agent is a CLI tool that answers questions by calling a Large Language Model (LLM). It forms the foundation for the intelligent agent that will be extended with tools and agentic capabilities in subsequent tasks.
+This agent is a CLI tool that answers questions about the software project by calling a Large Language Model (LLM) with tool-calling capabilities. The agent can read files, list directories, and query the backend API to provide accurate answers based on both static source code and live system data.
 
 ## Architecture
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   CLI Arg   │ ──► │  agent.py   │ ──► │  LLM API    │ ──► │  JSON Out   │
-│  (question) │     │  (parser)   │     │  (Qwen)     │     │  (stdout)   │
-└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
+│   CLI Arg   │ ──► │  agent.py   │ ──► │  LLM API    │ ──► │ Tool Calls  │
+│  (question) │     │ (agentic    │     │  (Qwen)     │     │ (read_file, │
+└─────────────┘     │   loop)     │     └─────────────┘     │ list_files, │
+                    └─────────────┘           │             │ query_api)  │
+                           │                  │             └─────────────┘
+                           │                  ▼                    │
+                           │           ┌─────────────┐             │
+                           │           │ Tool Result │ ◄───────────┘
+                           │           └─────────────┘
+                           │                  │
+                           ▼                  ▼
+                    ┌─────────────────────────────────┐
+                    │  Final Answer + Tool Call Log   │
+                    │  JSON to stdout                 │
+                    └─────────────────────────────────┘
                            │
                            ▼
                     ┌─────────────┐
@@ -19,131 +31,176 @@ This agent is a CLI tool that answers questions by calling a Large Language Mode
                     └─────────────┘
 ```
 
-### 1. Configuration Loader (`load_config`)
+### Agentic Loop
 
-- Reads environment variables: `LLM_API_KEY`, `LLM_API_BASE`, `LLM_MODEL`
-- First checks system environment variables (for injection by autochecker/tests)
-- Falls back to `.env.agent.secret` file if env vars not set
-- Validates that all three required variables are present
-- Exits with error code 1 if any required variable is missing
+The agent uses an iterative loop to answer questions:
 
-### 2. LLM Client (`call_llm`)
+1. **Parse Question**: Receive the user's question from CLI arguments
+2. **Call LLM**: Send the question to the LLM with a system prompt and tool schemas
+3. **Check for Tool Calls**: If the LLM requests tool calls, execute them
+4. **Add Results to History**: Append tool results to the conversation
+5. **Repeat**: Call the LLM again with the updated conversation
+6. **Return Answer**: When the LLM provides a final answer, output JSON and exit
 
-- Makes HTTP POST requests to the LLM's chat completions endpoint
-- Uses `httpx` for synchronous HTTP communication
-- Sends the user question with a minimal system prompt
-- Parses the response and extracts the answer content
-- Handles HTTP errors, connection errors, and unexpected response formats
+The loop runs for up to 20 iterations to prevent infinite loops while allowing multi-step reasoning.
 
-### 3. Output Formatter (`main`)
+## Tools
 
-- Validates command-line arguments
-- Orchestrates the flow: load config → call LLM → format output
-- Outputs valid JSON to stdout: `{"answer": "...", "tool_calls": []}`
-- Sends all debug/logging output to stderr
+### 1. `query_api`
 
-## LLM Provider
+**Purpose:** Query the backend LMS API for live data.
 
-**Provider:** Qwen Code API (self-hosted on VM)
+**Parameters:**
+- `method` (required): HTTP method (GET, POST, PUT, DELETE)
+- `path` (required): API endpoint path (e.g., `/items/`, `/analytics/completion-rate?lab=lab-06`)
+- `body` (optional): JSON request body for POST/PUT requests
+- `skip_auth` (optional): If true, omit the Authorization header (useful for testing auth requirements)
 
-**Model:** `qwen3-coder-plus`
+**Authentication:** Uses `LMS_API_KEY` from `.env.docker.secret` via the `Authorization: Bearer <key>` header.
 
-**Why Qwen Code:**
-- 1000 free requests per day
-- Works from Russia without restrictions
-- No credit card required
-- OpenAI-compatible API endpoint
-- Strong tool-calling capabilities (for future tasks)
+**Returns:** JSON object with `status_code` and `body` fields.
+
+**Use cases:**
+- "How many items are in the database?" → `GET /items/`
+- "What status code without auth?" → `GET /items/` with `skip_auth=true`
+- "What's the completion rate?" → `GET /analytics/completion-rate?lab=lab-06`
+
+### 2. `read_file`
+
+**Purpose:** Read a file from the project (wiki, source code, configuration).
+
+**Parameters:**
+- `path` (required): Relative path from project root (e.g., `wiki/backend.md`, `backend/app/main.py`)
+
+**Returns:** JSON object with `content` and `path` fields, or `error` if file not found.
+
+**Use cases:**
+- "What framework does the backend use?" → Read `backend/app/main.py`
+- "How to protect a branch?" → Read `wiki/github.md`
+- "Explain the request lifecycle" → Read `docker-compose.yml`, `Dockerfile`
+
+### 3. `list_files`
+
+**Purpose:** List files in a directory.
+
+**Parameters:**
+- `path` (required): Relative path to directory (e.g., `backend/app/routers/`, `wiki/`)
+
+**Returns:** JSON object with `files` (sorted list) and `path` fields.
+
+**Use cases:**
+- "List all API routers" → `list_files backend/app/routers/`
+- "What wiki files exist?" → `list_files wiki/`
+
+## System Prompt
+
+The system prompt guides the LLM's tool selection:
+
+```
+Tool selection guide:
+- For LIVE DATA (database, API responses) → use query_api
+- For SOURCE CODE (framework, configuration) → use read_file
+- For PROJECT STRUCTURE (what files exist) → use list_files
+- For WIKI DOCUMENTATION → use read_file on wiki/ files
+
+Important:
+- For "list all X" questions: use list_files ONCE, then answer from file names
+- Don't re-read the same file if truncated
+- Configuration files (Dockerfile, docker-compose.yml) are in project root
+```
 
 ## Configuration
 
-The agent reads LLM configuration from **environment variables**:
+The agent reads all configuration from environment variables:
 
-- `LLM_API_KEY` - API key for authentication
-- `LLM_API_BASE` - Base URL of the LLM API endpoint
-- `LLM_MODEL` - Model identifier to use
+| Variable | Source | Purpose |
+|----------|--------|---------|
+| `LLM_API_KEY` | `.env.agent.secret` | LLM provider authentication |
+| `LLM_API_BASE` | `.env.agent.secret` | LLM API endpoint URL |
+| `LLM_MODEL` | `.env.agent.secret` | Model identifier |
+| `LMS_API_KEY` | `.env.docker.secret` | Backend API authentication |
+| `AGENT_API_BASE_URL` | env or default | Backend API base URL (default: `http://localhost:42002`) |
 
-**Priority:** System environment variables take precedence over `.env.agent.secret`.
+**Priority:** System environment variables take precedence over `.env.*` files. This allows the autochecker to inject its own credentials.
 
-This allows the autochecker to inject its own credentials when testing.
+## Output Format
 
-For local development, create `.env.agent.secret`:
-
-```bash
-cp .env.agent.example .env.agent.secret
-```
-
-## Usage
-
-### Basic Usage
-
-```bash
-uv run agent.py "What is Python?"
-```
-
-### Example Output
-
+**stdout:** Single-line JSON:
 ```json
-{"answer": "Python is a high-level, general-purpose programming language.", "tool_calls": []}
+{
+  "answer": "The backend uses FastAPI...",
+  "tool_calls": [
+    {
+      "tool": "read_file",
+      "args": {"path": "backend/app/main.py"},
+      "result": "{\"content\": \"...\", \"path\": \"backend/app/main.py\"}"
+    }
+  ],
+  "source": "backend/app/main.py"
+}
 ```
 
-### Output Format
+**stderr:** Progress logs and debug information.
 
-- **stdout:** Single-line JSON with `answer` (string) and `tool_calls` (array)
-- **stderr:** Progress logs and error messages
-- **Exit code:** 0 on success, 1 on error
+**Exit code:** 0 on success, 1 on error.
 
-## Error Handling
+## Benchmark Results
 
-| Error | Behavior |
-|-------|----------|
-| Missing `.env.agent.secret` | Error to stderr, exit 1 |
-| Missing environment variable | Error to stderr, exit 1 |
-| HTTP error (4xx/5xx) | Error to stderr with response, exit 1 |
-| Connection failure | Error to stderr, exit 1 |
-| Unexpected API response | Error to stderr, exit 1 |
+The agent passes all 10 local evaluation questions:
 
-## Dependencies
+| # | Question | Tools Used | Status |
+|---|----------|------------|--------|
+| 0 | Wiki: protect a branch | `read_file` | ✓ |
+| 1 | Wiki: SSH connection | `read_file` | ✓ |
+| 2 | Web framework | `read_file` | ✓ |
+| 3 | API router modules | `list_files` | ✓ |
+| 4 | Items in database | `query_api` | ✓ |
+| 5 | Status code without auth | `query_api` (skip_auth) | ✓ |
+| 6 | /analytics/completion-rate error | `query_api`, `read_file` | ✓ |
+| 7 | /analytics/top-learners crash | `query_api`, `read_file` | ✓ |
+| 8 | Request lifecycle | `read_file` | ✓ |
+| 9 | ETL idempotency | `read_file` | ✓ |
 
-- `httpx` - HTTP client for API calls
-- `python-dotenv` - Environment variable loading
+## Lessons Learned
 
-## Testing
+### Tool Design
 
-Run the agent manually:
+1. **Clear descriptions matter**: Initially, the LLM would read every router file individually for "list all routers" questions. Adding explicit guidance ("use list_files ONCE, then answer from file names") fixed this.
 
-```bash
-uv run agent.py "What does REST stand for?"
-```
+2. **Low temperature for determinism**: Setting `temperature=0.1` makes tool calling more consistent. Higher temperatures caused the LLM to sometimes skip steps or loop.
 
-Run automated tests:
+3. **Source tracking**: The eval checks for a `source` field. Tracking which files were read and including the first one in the output was necessary for passing.
 
-```bash
-uv run pytest tests/test_task1.py
-```
+### Agentic Loop
 
-## Extending the Agent
+1. **Iteration limits**: Started with 5 iterations, increased to 20 for complex multi-step questions (like tracing request lifecycle through multiple files).
 
-In subsequent tasks, the agent will be extended with:
+2. **Message history**: Keeping the full conversation history (including tool results) is essential for multi-turn reasoning.
 
-- **Task 2:** Tool definitions and execution capabilities
-- **Task 3:** Agentic loop for multi-step reasoning
-- **Task 4+:** Domain knowledge and wiki integration
+3. **Error handling**: Gracefully handling file-not-found and API errors prevents crashes and lets the LLM adapt.
+
+### Authentication
+
+1. **Two keys**: `LMS_API_KEY` (backend) and `LLM_API_KEY` (LLM provider) serve different purposes. Mixing them up causes confusing failures.
+
+2. **Skip auth for testing**: The `skip_auth` parameter was necessary for question 6, which asks what happens without authentication.
+
+## Future Improvements
+
+1. **Parallel tool calls**: Currently, tool calls are executed sequentially. Parallel execution would speed up multi-file analysis.
+
+2. **Content summarization**: For large files, summarizing content instead of truncating might help the LLM find relevant sections.
+
+3. **Caching**: Caching file contents and API responses would reduce redundant calls in multi-turn conversations.
 
 ## Troubleshooting
 
-**"Missing required environment variable"**
-- Ensure `.env.agent.secret` exists and contains all three variables
-- Check that there are no typos in variable names
+**"Missing LMS_API_KEY"**: Ensure `.env.docker.secret` exists with `LMS_API_KEY=my-secret-api-key`.
 
-**"HTTP error: 401"**
-- Your `LLM_API_KEY` is invalid or expired
-- Regenerate your API key from Qwen Code
+**Agent times out**: Check that the LLM API (`LLM_API_BASE`) is accessible. The qwen-code-oai-proxy container must be running.
 
-**"Request failed: Connection refused"**
-- The Qwen Code API may not be running on your VM
-- Check that the VM IP and port in `LLM_API_BASE` are correct
+**401 on API calls**: Verify `LMS_API_KEY` matches the backend's expected key.
 
-**"Unexpected API response format"**
-- The LLM returned an unexpected response structure
-- Check the LLM service status or try a different model
+**LLM doesn't call tools**: The system prompt might need adjustment. Check that tool descriptions are clear.
+
+**Wrong tool called**: Improve the tool selection guide in the system prompt with more specific examples.
