@@ -2,22 +2,42 @@
 
 ## Overview
 
-This agent is a CLI tool that answers questions by calling a Large Language Model (LLM). It forms the foundation for the intelligent agent that will be extended with tools and agentic capabilities in subsequent tasks.
+This agent is a CLI tool that answers questions by calling a Large Language Model (LLM) with **tool-calling capabilities**. The agent can use tools (`read_file`, `list_files`) to navigate the project wiki and find answers to documentation questions.
 
 ## Architecture
+
+### Task 1 Architecture (Basic LLM Call)
 
 ```
 ┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
 │   CLI Arg   │ ──► │  agent.py   │ ──► │  LLM API    │ ──► │  JSON Out   │
 │  (question) │     │  (parser)   │     │  (Qwen)     │     │  (stdout)   │
 └─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
+```
+
+### Task 2 Architecture (Agentic Loop with Tools)
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   Question  │ ──► │  agent.py   │ ──► │  LLM API    │
+└─────────────┘     │  (loop)     │ ◄── │  (tools)    │
+                    │             │ ──► │             │
+                    │  ┌─────────┐│     └─────────────┘
+                    │  │ Tools   ││──────────┘
+                    │  │ - read  ││
+                    │  │ - list  ││
+                    │  └─────────┘│
+                    └─────────────┘
                            │
                            ▼
                     ┌─────────────┐
-                    │  Logs       │
-                    │  (stderr)   │
+                    │  JSON Out   │
+                    │  + tool_    │
+                    │  calls log  │
                     └─────────────┘
 ```
+
+## Components
 
 ### 1. Configuration Loader (`load_config`)
 
@@ -27,19 +47,120 @@ This agent is a CLI tool that answers questions by calling a Large Language Mode
 - Validates that all three required variables are present
 - Exits with error code 1 if any required variable is missing
 
-### 2. LLM Client (`call_llm`)
+### 2. Tools
 
-- Makes HTTP POST requests to the LLM's chat completions endpoint
-- Uses `httpx` for synchronous HTTP communication
-- Sends the user question with a minimal system prompt
-- Parses the response and extracts the answer content
-- Handles HTTP errors, connection errors, and unexpected response formats
+The agent has two tools that the LLM can call:
 
-### 3. Output Formatter (`main`)
+#### `read_file`
+
+**Purpose:** Read the contents of a file from the project repository.
+
+**Parameters:**
+- `path` (string, required) - Relative path from project root (e.g., `wiki/git-workflow.md`)
+
+**Returns:** File contents as string, or error message if inaccessible.
+
+**Security:** Validates path does not escape project root using `../` traversal.
+
+#### `list_files`
+
+**Purpose:** List files and directories at a given path.
+
+**Parameters:**
+- `path` (string, required) - Relative directory path from project root (e.g., `wiki`)
+
+**Returns:** Newline-separated listing of entries, or error message.
+
+**Security:** Validates path does not escape project root.
+
+### 3. Path Security (`validate_path`)
+
+**Threat Model:** Prevent the LLM from being tricked into accessing files outside the project directory.
+
+**Implementation:**
+1. Resolve the full absolute path using `Path.resolve()`
+2. Check that resolved path starts with `PROJECT_ROOT`
+3. Raise `SecurityError` if path escapes boundary
+
+**Example:**
+```python
+# Valid: wiki/git-workflow.md → /project/wiki/git-workflow.md
+# Rejected: ../../etc/passwd → /etc/passwd (outside project)
+```
+
+### 4. Agentic Loop (`run_agentic_loop`)
+
+The agentic loop enables multi-step reasoning:
+
+**Loop Structure:**
+```
+1. Build messages: [system prompt, user question]
+2. Call LLM with tool schemas
+3. Parse response:
+   - If tool_calls: execute tools, append results, go to step 2
+   - If text answer: extract answer + source, output JSON, exit
+4. Max 10 iterations (prevent infinite loops)
+```
+
+**Message Flow:**
+```python
+# Initial request
+messages = [
+    {"role": "system", "content": SYSTEM_PROMPT},
+    {"role": "user", "content": question}
+]
+
+# After LLM returns tool_calls
+messages.append(assistant_message_with_tool_calls)
+
+# Execute tool, get result
+result = execute_tool(tool_name, args)
+
+# Append tool result
+messages.append({
+    "role": "tool",
+    "tool_call_id": tool_call_id,
+    "content": result
+})
+
+# Loop back to LLM
+```
+
+**Termination Conditions:**
+1. LLM returns no tool calls → Final answer, exit
+2. 10 tool calls reached → Stop, return partial results
+3. Error in execution → Report to LLM, continue loop
+
+### 5. System Prompt Strategy
+
+The system prompt guides the LLM to use tools effectively:
+
+**Key Instructions:**
+1. Use `list_files` to discover wiki files (start with `wiki` directory)
+2. Use `read_file` to examine specific files for answers
+3. Identify the relevant section header
+4. Create source reference in format: `wiki/filename.md#section-anchor`
+
+**Section Anchor Format:**
+- Convert header to lowercase
+- Replace spaces with hyphens
+- Remove special characters
+- Example: `## Resolving Merge Conflicts` → `#resolving-merge-conflicts`
+
+### 6. Output Formatter (`main`)
 
 - Validates command-line arguments
-- Orchestrates the flow: load config → call LLM → format output
-- Outputs valid JSON to stdout: `{"answer": "...", "tool_calls": []}`
+- Runs the agentic loop
+- Outputs JSON to stdout:
+  ```json
+  {
+    "answer": "...",
+    "source": "wiki/filename.md#section-anchor",
+    "tool_calls": [
+      {"tool": "read_file", "args": {"path": "..."}, "result": "..."}
+    ]
+  }
+  ```
 - Sends all debug/logging output to stderr
 
 ## LLM Provider
@@ -53,7 +174,7 @@ This agent is a CLI tool that answers questions by calling a Large Language Mode
 - Works from Russia without restrictions
 - No credit card required
 - OpenAI-compatible API endpoint
-- Strong tool-calling capabilities (for future tasks)
+- Strong tool-calling capabilities
 
 ## Configuration
 
@@ -64,8 +185,6 @@ The agent reads LLM configuration from **environment variables**:
 - `LLM_MODEL` - Model identifier to use
 
 **Priority:** System environment variables take precedence over `.env.agent.secret`.
-
-This allows the autochecker to inject its own credentials when testing.
 
 For local development, create `.env.agent.secret`:
 
@@ -78,30 +197,45 @@ cp .env.agent.example .env.agent.secret
 ### Basic Usage
 
 ```bash
-uv run agent.py "What is Python?"
+uv run agent.py "How do you resolve a merge conflict?"
 ```
 
 ### Example Output
 
 ```json
-{"answer": "Python is a high-level, general-purpose programming language.", "tool_calls": []}
+{
+  "answer": "Edit the conflicting file, choose which changes to keep, then stage and commit.",
+  "source": "wiki/git-workflow.md#resolving-merge-conflicts",
+  "tool_calls": [
+    {"tool": "list_files", "args": {"path": "wiki"}, "result": "git-workflow.md\n..."},
+    {"tool": "read_file", "args": {"path": "wiki/git-workflow.md"}, "result": "..."}
+  ]
+}
 ```
 
 ### Output Format
 
-- **stdout:** Single-line JSON with `answer` (string) and `tool_calls` (array)
-- **stderr:** Progress logs and error messages
-- **Exit code:** 0 on success, 1 on error
+| Field | Type | Description |
+|-------|------|-------------|
+| `answer` | string | The LLM's answer to the question |
+| `source` | string | Wiki reference in format `wiki/file.md#anchor` |
+| `tool_calls` | array | Log of all tool calls made during execution |
+
+Each tool call entry has:
+- `tool` - Tool name (`read_file` or `list_files`)
+- `args` - Arguments passed to the tool
+- `result` - Tool output (truncated if large)
 
 ## Error Handling
 
 | Error | Behavior |
 |-------|----------|
-| Missing `.env.agent.secret` | Error to stderr, exit 1 |
 | Missing environment variable | Error to stderr, exit 1 |
-| HTTP error (4xx/5xx) | Error to stderr with response, exit 1 |
+| Path traversal attempt | Returns error to LLM, continues loop |
+| File not found | Returns error message to LLM |
+| HTTP error (4xx/5xx) | Error to stderr, exit 1 |
 | Connection failure | Error to stderr, exit 1 |
-| Unexpected API response | Error to stderr, exit 1 |
+| Max tool calls reached | Returns partial results with warning |
 
 ## Dependencies
 
@@ -110,40 +244,43 @@ uv run agent.py "What is Python?"
 
 ## Testing
 
-Run the agent manually:
+### Manual Testing
 
 ```bash
-uv run agent.py "What does REST stand for?"
+# Test read_file tool
+uv run agent.py "How do you resolve a merge conflict?"
+
+# Test list_files tool
+uv run agent.py "What files are in the wiki directory?"
 ```
 
-Run automated tests:
+### Automated Tests
 
 ```bash
-uv run pytest tests/test_task1.py
+uv run pytest tests/test_task1.py  # Task 1 tests
+uv run pytest tests/test_task2.py  # Task 2 tests
 ```
-
-## Extending the Agent
-
-In subsequent tasks, the agent will be extended with:
-
-- **Task 2:** Tool definitions and execution capabilities
-- **Task 3:** Agentic loop for multi-step reasoning
-- **Task 4+:** Domain knowledge and wiki integration
 
 ## Troubleshooting
 
 **"Missing required environment variable"**
-- Ensure `.env.agent.secret` exists and contains all three variables
-- Check that there are no typos in variable names
+- Ensure `.env.agent.secret` exists with `LLM_API_KEY`, `LLM_API_BASE`, `LLM_MODEL`
 
 **"HTTP error: 401"**
 - Your `LLM_API_KEY` is invalid or expired
-- Regenerate your API key from Qwen Code
 
 **"Request failed: Connection refused"**
-- The Qwen Code API may not be running on your VM
-- Check that the VM IP and port in `LLM_API_BASE` are correct
+- Qwen Code API not running on VM
+- Check VM IP and port in `LLM_API_BASE`
 
-**"Unexpected API response format"**
-- The LLM returned an unexpected response structure
-- Check the LLM service status or try a different model
+**"Access denied - Path traversal detected"**
+- The agent blocked an attempt to read files outside the project
+- This is expected security behavior
+
+**LLM keeps calling tools without answering**
+- May hit 10 tool call limit
+- Check system prompt is guiding LLM to provide final answer
+
+**Source reference is `wiki/unknown.md`**
+- No wiki files were read during the loop
+- LLM may not have found relevant information
