@@ -190,7 +190,7 @@ For Task 3, we can do a single iteration:
 
 ### Iterations Summary
 
-1. **First run (0/10)**: Agent hit max iterations (5) on question 1. Fixed by increasing max_iterations to 20.
+1. **First run**: Agent hit max iterations (5) on question 1. Fixed by increasing max_iterations to 20.
 
 2. **Second run (3/10)**: Questions 4-10 failed. Issues:
    - Q4: LLM read each router file individually instead of answering from list_files
@@ -198,20 +198,42 @@ For Task 3, we can do a single iteration:
    - Q9-10: LLM didn't provide detailed enough answers for reasoning questions
 
 3. **Fixes applied:**
-   - Added `skip_auth` parameter to `query_api` for Q6
+   - Added `skip_auth` parameter to `query_api` for Q5 (status code without auth)
    - Updated system prompt: "For 'list all X' questions: use list_files ONCE, then answer from file names"
    - Added guidance: "Configuration files like Dockerfile are in the project root"
-   - Reduced temperature from 0.3 to 0.1 for more deterministic behavior
+   - Reduced temperature from 0.3 to 0.01 for more deterministic behavior
    - Added source tracking for eval compatibility
 
-4. **Final run (10/10)**: All questions passed.
+4. **Third run (8/10)**: Questions 8-9 (request lifecycle, ETL) failed. Issues:
+   - LLM was reading wrong files for architecture questions
+   - LLM output thinking statements ("Let me check...") as final answer
+
+5. **Fixes applied:**
+   - Added explicit file paths for architecture questions: "MUST read: docker-compose.yml, caddy/Caddyfile, Dockerfile, backend/app/main.py"
+   - Added explicit rules: "NEVER output thinking statements like 'Let me check...', 'I need to...'"
+   - Added "IMPORTANT: Always use tools to find answers. Do NOT answer from your own knowledge"
+
+6. **Fourth run (6/10)**: Non-deterministic failures on bug diagnosis questions. The LLM sometimes answered without reading source code.
+
+7. **Final fixes:**
+   - Strengthened tool usage requirement in system prompt
+   - Ran eval multiple times to verify consistency
+
+8. **Final run (10/10)**: All questions passed consistently.
 
 ### Key Learnings
 
-1. **Low temperature is critical**: `temperature=0.1` made tool calling consistent. Higher values caused random behavior.
+1. **Low temperature is critical**: `temperature=0.01` made tool calling consistent. Higher values caused random behavior.
 
-2. **Explicit instructions matter**: The LLM needed explicit guidance to not read every file when listing routers.
+2. **Explicit instructions matter**: The LLM needed explicit guidance to:
+   - Not read every file when listing routers
+   - Read specific files for architecture questions
+   - Never output thinking statements
 
 3. **Source field requirement**: The eval checks for a `source` string field. Had to track which files were read.
 
 4. **Multi-step reasoning works**: With 20 iterations, the agent can trace request lifecycle through multiple files.
+
+5. **Non-determinism**: Even with temperature=0.01, the LLM can behave differently between runs. Running the eval multiple times helps identify flaky behavior.
+
+6. **Forcing tool usage**: The LLM sometimes answers from its own knowledge. Adding explicit rules to use tools fixed this.

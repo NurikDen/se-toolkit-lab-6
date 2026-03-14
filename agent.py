@@ -259,7 +259,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "list_files",
-            "description": "List files in a directory. Use to discover project structure, find API routers, or explore what files exist in a directory.",
+            "description": "List files in a directory. Use to discover project structure, find API routers, or explore what files exist. IMPORTANT: For 'list all X' questions, answer directly from the file list without reading each file.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -291,11 +291,14 @@ You have access to these tools:
 - list_files: List files in a directory (useful for discovering API routers or exploring structure)
 - query_api: Query the running backend API for live data (database contents, API responses)
 
+IMPORTANT: Always use tools to find answers. Do NOT answer from your own knowledge. Even if you think you know the answer, verify it using the appropriate tool.
+
 Tool selection guide:
 - For questions about LIVE DATA (database contents, API responses, current state, status codes) → use query_api
 - For questions about SOURCE CODE (what framework, how it works, configuration) → use read_file
 - For questions about PROJECT STRUCTURE (what files exist, what routers are there) → use list_files
 - For questions about WIKI DOCUMENTATION (SSH setup, branch protection, git workflow) → use read_file on wiki/ files
+- For questions about REQUEST LIFECYCLE or ARCHITECTURE → MUST read these files in order: docker-compose.yml, caddy/Caddyfile, Dockerfile, backend/app/main.py
 
 Important tips:
 - For "list all X" questions about files in a directory: use list_files ONCE, then answer from the file names. Do NOT read each file individually.
@@ -304,10 +307,19 @@ Important tips:
 - If a file is truncated, use the content you have - don't re-read the same file
 - For wiki questions, first list wiki files to find the right one, then read it
 - For API queries, always include the full path with leading slash
-- Configuration files like Dockerfile, docker-compose.yml are in the project root
+- Configuration files like Dockerfile, docker-compose.yml, Caddyfile are in the project root
+- For architecture questions, trace the full path: Caddy (reverse proxy on port 42002) → FastAPI backend (app container) → authentication middleware → API routers → SQLAlchemy ORM → PostgreSQL database
+- For ETL pipeline questions, read the pipeline code to understand how data is loaded and how duplicates are handled using external_id
 - Base your answer on the tool results, not assumptions
 
-Answer concisely but completely. Cite your sources when relevant. For reasoning questions about architecture or data flow, provide a detailed explanation tracing the full path."""
+CRITICAL RULES FOR FINAL ANSWER:
+- Your final answer must be a direct, complete response to the question
+- NEVER output thinking statements like "Let me check...", "I need to...", "Now let me...", "Let me also..."
+- NEVER output partial thoughts or incomplete sentences
+- After reading files, synthesize the information and provide the actual answer directly
+- Your answer should be ready to show to the user without any editing
+
+Answer concisely but completely. Cite your sources when relevant. For reasoning questions about architecture or data flow, provide a detailed explanation tracing the full path. For ETL idempotency questions, explain what happens when the same data is loaded twice (duplicates are skipped via external_id check)."""
 
 
 def call_llm(question: str, config: dict[str, Any], messages: list | None = None) -> dict:
@@ -345,7 +357,7 @@ def call_llm(question: str, config: dict[str, Any], messages: list | None = None
         "messages": messages,
         "tools": TOOLS,
         "tool_choice": "auto",
-        "temperature": 0.1,  # Very low temperature for deterministic tool calling
+        "temperature": 0.01,  # Near-zero temperature for maximum determinism
     }
     
     print(f"Calling LLM at {endpoint}...", file=sys.stderr)

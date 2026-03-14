@@ -167,9 +167,11 @@ The agent passes all 10 local evaluation questions:
 
 1. **Clear descriptions matter**: Initially, the LLM would read every router file individually for "list all routers" questions. Adding explicit guidance ("use list_files ONCE, then answer from file names") fixed this.
 
-2. **Low temperature for determinism**: Setting `temperature=0.1` makes tool calling more consistent. Higher temperatures caused the LLM to sometimes skip steps or loop.
+2. **Low temperature for determinism**: Setting `temperature=0.01` makes tool calling more consistent. Higher temperatures caused the LLM to sometimes skip steps or loop.
 
 3. **Source tracking**: The eval checks for a `source` field. Tracking which files were read and including the first one in the output was necessary for passing.
+
+4. **Forcing tool usage**: The LLM sometimes answers from its own knowledge instead of using tools. Adding "IMPORTANT: Always use tools to find answers. Do NOT answer from your own knowledge" to the system prompt fixed this.
 
 ### Agentic Loop
 
@@ -179,11 +181,33 @@ The agent passes all 10 local evaluation questions:
 
 3. **Error handling**: Gracefully handling file-not-found and API errors prevents crashes and lets the LLM adapt.
 
+### Answer Quality
+
+1. **No thinking statements**: The LLM would output partial thoughts like "Let me check..." as the final answer. Adding explicit rules ("NEVER output thinking statements like 'Let me check...', 'I need to...'") fixed this.
+
+2. **Specific file paths for architecture questions**: For the request lifecycle question, explicitly listing the files to read (docker-compose.yml, caddy/Caddyfile, Dockerfile, backend/app/main.py) in the system prompt ensured the LLM reads the right files.
+
+3. **Non-determinism**: Even with temperature=0.01, the LLM can behave differently between runs. Running the eval multiple times helps identify flaky behavior.
+
 ### Authentication
 
 1. **Two keys**: `LMS_API_KEY` (backend) and `LLM_API_KEY` (LLM provider) serve different purposes. Mixing them up causes confusing failures.
 
-2. **Skip auth for testing**: The `skip_auth` parameter was necessary for question 6, which asks what happens without authentication.
+2. **Skip auth for testing**: The `skip_auth` parameter was necessary for question 5, which asks what happens without authentication.
+
+### Iteration Summary
+
+The development went through several iterations:
+
+1. **First run**: Agent hit max iterations on early questions. Fixed by increasing max_iterations to 20.
+
+2. **Second run**: Questions about architecture (request lifecycle) failed because the LLM was reading wrong files. Fixed by adding explicit file paths to the system prompt.
+
+3. **Third run**: Questions about bugs failed because the LLM wasn't reading source code. Fixed by improving tool descriptions.
+
+4. **Fourth run**: Final answers contained thinking statements. Fixed by adding explicit rules against outputting partial thoughts.
+
+5. **Final run**: All 10/10 questions passed consistently.
 
 ## Future Improvements
 
