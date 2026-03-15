@@ -135,13 +135,13 @@ function Dashboard({ token }: { token: string }) {
 
       <div className="charts-grid">
         <div className="chart-card">
-          <h3>Score Distribution</h3>
-          <Bar data={scoreData} options={{ plugins: { legend: { display: false } } }} />
+          <h3>Submissions Timeline</h3>
+          <Line data={timelineData} />
         </div>
 
         <div className="chart-card">
-          <h3>Submissions Timeline</h3>
-          <Line data={timelineData} />
+          <h3>Score Distribution</h3>
+          <Bar data={scoreData} options={{ plugins: { legend: { display: false } } }} />
         </div>
 
         <div className="chart-card">
